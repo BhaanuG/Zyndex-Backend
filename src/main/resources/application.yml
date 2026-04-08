@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: zyndex-spring-backend
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:zyndex_db}?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false&serverTimezone=UTC
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:}
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 30MB
+  mail:
+    host: ${OTP_SMTP_HOST:}
+    port: ${OTP_SMTP_PORT:587}
+    username: ${OTP_SMTP_USER:}
+    password: ${OTP_SMTP_PASS:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+
+server:
+  port: ${PORT:8080}
+
+zyndex:
+  frontend-url: ${FRONTEND_URL:http://localhost:5173}
+  jwt-secret: ${JWT_SECRET:replace-this-with-a-long-random-secret}
+  main-admin-email: ${MAIN_ADMIN_EMAIL:admin@example.com}
+  main-admin-password: ${MAIN_ADMIN_PASSWORD:change-me}
+  main-admin-name: ${MAIN_ADMIN_NAME:Main Admin}
+  otp-mail-from: ${OTP_MAIL_FROM:${OTP_SMTP_USER:}}
+  otp-smtp-secure: ${OTP_SMTP_SECURE:false}
+  expose-otp-in-development: ${OTP_EXPOSE_IN_DEVELOPMENT:false}
+  upload-dir: ${UPLOAD_DIR:../backend/uploads}
