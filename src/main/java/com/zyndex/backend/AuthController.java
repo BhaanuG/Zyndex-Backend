@@ -51,7 +51,7 @@ class AuthController {
                     "user", user,
                     "confirmationEmailSent", true,
                     "confirmationEmailError", "");
-        } catch (MailException error) {
+        } catch (MailException | ApiException error) {
             return Map.of(
                     "message", "Account created successfully, but confirmation email could not be sent.",
                     "user", user,
