@@ -10,6 +10,11 @@ public record AppProperties(
         String mainAdminPassword,
         String mainAdminName,
         String otpMailFrom,
+        String resendApiKey,
+        String gmailClientId,
+        String gmailClientSecret,
+        String gmailRefreshToken,
+        String gmailSenderEmail,
         boolean otpSmtpSecure,
         boolean exposeOtpInDevelopment,
         String uploadDir

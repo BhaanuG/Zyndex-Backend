@@ -1,7 +1,17 @@
 package com.zyndex.backend;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -18,9 +28,14 @@ import org.springframework.web.bind.annotation.RestController;
 class OtpController {
     private static final long OTP_TTL_SECONDS = 120;
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final String RESEND_ENDPOINT = "https://api.resend.com/emails";
+    private static final String GMAIL_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+    private static final String GMAIL_SEND_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
     private final Map<String, OtpRecord> otps = new ConcurrentHashMap<>();
     private final JavaMailSender mailSender;
     private final AppProperties properties;
+    private final HttpClient httpClient = HttpClient.newHttpClient();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     OtpController(JavaMailSender mailSender, AppProperties properties) {
         this.mailSender = mailSender;
@@ -39,8 +54,22 @@ class OtpController {
         }
         String otp = String.valueOf(1000 + RANDOM.nextInt(9000));
         otps.put(key(email, role), new OtpRecord(otp, Instant.now().plusSeconds(OTP_TTL_SECONDS), 0));
+        if (hasGmailConfiguration()) {
+            sendWithGmail(email, otp);
+            return Map.of(
+                    "message", "OTP sent successfully.",
+                    "expiresInSeconds", OTP_TTL_SECONDS,
+                    "emailSent", true);
+        }
         if (properties.otpMailFrom() == null || properties.otpMailFrom().isBlank()) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "OTP SMTP email is not configured. Add OTP_SMTP_USER and OTP_SMTP_PASS in backend/.env.");
+        }
+        if (properties.resendApiKey() != null && !properties.resendApiKey().isBlank()) {
+            sendWithResend(email, otp);
+            return Map.of(
+                    "message", "OTP sent successfully.",
+                    "expiresInSeconds", OTP_TTL_SECONDS,
+                    "emailSent", true);
         }
         SimpleMailMessage message = new SimpleMailMessage();
         message.setFrom(properties.otpMailFrom());
@@ -57,9 +86,6 @@ class OtpController {
         response.put("message", "OTP sent successfully.");
         response.put("expiresInSeconds", OTP_TTL_SECONDS);
         response.put("emailSent", true);
-        if (properties.exposeOtpInDevelopment()) {
-            response.put("devOtp", otp);
-        }
         return response;
     }
 
@@ -107,6 +133,125 @@ class OtpController {
 
     private String key(String email, String role) {
         return role + ":" + email;
+    }
+
+    private boolean hasGmailConfiguration() {
+        return properties.gmailClientId() != null && !properties.gmailClientId().isBlank()
+                && properties.gmailClientSecret() != null && !properties.gmailClientSecret().isBlank()
+                && properties.gmailRefreshToken() != null && !properties.gmailRefreshToken().isBlank()
+                && properties.gmailSenderEmail() != null && !properties.gmailSenderEmail().isBlank();
+    }
+
+    private void sendWithGmail(String email, String otp) {
+        String accessToken = fetchGmailAccessToken();
+        String mimeMessage = """
+                From: %s
+                To: %s
+                Subject: Your Zyndex login OTP
+                Content-Type: text/plain; charset=UTF-8
+
+                Your Zyndex login OTP is %s. This code expires in 2 minutes and can be used only once.
+                """.formatted(properties.gmailSenderEmail(), email, otp);
+        String raw = Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(mimeMessage.getBytes(StandardCharsets.UTF_8));
+        String payload = """
+                {
+                  "raw": "%s"
+                }
+                """.formatted(raw);
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create(GMAIL_SEND_ENDPOINT))
+                .header("Authorization", "Bearer " + accessToken)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .build();
+
+        try {
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            int statusCode = response.statusCode();
+            if (statusCode < 200 || statusCode >= 300) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not send OTP email. Please check Gmail API configuration and try again.");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not send OTP email. Please check Gmail API configuration and try again.");
+        } catch (IOException error) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not send OTP email. Please check Gmail API configuration and try again.");
+        }
+    }
+
+    private String fetchGmailAccessToken() {
+        String form = "client_id=" + urlEncode(properties.gmailClientId())
+                + "&client_secret=" + urlEncode(properties.gmailClientSecret())
+                + "&refresh_token=" + urlEncode(properties.gmailRefreshToken())
+                + "&grant_type=refresh_token";
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create(GMAIL_TOKEN_ENDPOINT))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(form))
+                .build();
+
+        try {
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not get Gmail access token. Please check Gmail API credentials and try again.");
+            }
+            Map<String, Object> responseBody = objectMapper.readValue(response.body(), new TypeReference<>() {});
+            String accessToken = AuthSupport.str(responseBody.get("access_token"));
+            if (accessToken.isBlank()) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not get Gmail access token. Please check Gmail API credentials and try again.");
+            }
+            return accessToken;
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not get Gmail access token. Please check Gmail API credentials and try again.");
+        } catch (IOException error) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not get Gmail access token. Please check Gmail API credentials and try again.");
+        }
+    }
+
+    private String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    private void sendWithResend(String email, String otp) {
+        String payload = """
+                {
+                  "from": "%s",
+                  "to": ["%s"],
+                  "subject": "Your Zyndex login OTP",
+                  "text": "Your Zyndex login OTP is %s. This code expires in 2 minutes and can be used only once."
+                }
+                """.formatted(
+                escapeJson(properties.otpMailFrom()),
+                escapeJson(email),
+                escapeJson(otp));
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create(RESEND_ENDPOINT))
+                .header("Authorization", "Bearer " + properties.resendApiKey())
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .build();
+
+        try {
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            int statusCode = response.statusCode();
+            if (statusCode < 200 || statusCode >= 300) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not send OTP email. Please check Resend configuration and try again.");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not send OTP email. Please check Resend configuration and try again.");
+        } catch (IOException error) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Could not send OTP email. Please check Resend configuration and try again.");
+        }
+    }
+
+    private String escapeJson(String value) {
+        return value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"");
     }
 
     static class OtpRecord {
