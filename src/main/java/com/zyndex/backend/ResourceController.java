@@ -1,6 +1,8 @@
 package com.zyndex.backend;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -11,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.util.StringUtils;
@@ -161,16 +164,18 @@ class ResourceController {
             throw new ApiException(HttpStatus.NOT_FOUND, "Resource not found.");
         }
         String fileUrl = AuthSupport.str(rows.get(0).get("file_url"));
+        String title = AuthSupport.str(rows.get(0).get("title"));
         jdbc.update("UPDATE resources SET downloads_count = downloads_count + 1 WHERE id = ?", id);
         jdbc.update("INSERT INTO downloads (downloaded_at, resource_id, user_id) VALUES (NOW(), ?, ?)", id, user.get("id"));
         if (fileUrl.matches("(?i)^https?://.*")) {
-            return ResponseEntity.ok(Map.of("downloadUrl", fileUrl, "external", true));
+            return downloadExternalFile(fileUrl, title);
         }
         Path file = Path.of(fileUrl).isAbsolute() ? Path.of(fileUrl) : Path.of(properties.uploadDir()).getParent().resolve(fileUrl).normalize();
         if (!Files.exists(file)) {
             throw new ApiException(HttpStatus.NOT_FOUND, "Resource file is missing from the server.");
         }
         return ResponseEntity.ok()
+                .contentType(contentTypeForFile(file.getFileName().toString()))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getFileName() + "\"")
                 .body(new FileSystemResource(file));
     }
@@ -245,6 +250,40 @@ class ResourceController {
         String name = UUID.randomUUID() + (extension == null ? "" : "." + extension);
         file.transferTo(dir.resolve(name));
         return "uploads/" + name;
+    }
+
+    private ResponseEntity<?> downloadExternalFile(String fileUrl, String title) {
+        try (InputStream stream = URI.create(fileUrl).toURL().openStream()) {
+            byte[] bytes = stream.readAllBytes();
+            String filename = externalFilename(fileUrl, title);
+            return ResponseEntity.ok()
+                    .contentType(contentTypeForFile(filename))
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                    .body(bytes);
+        } catch (IOException error) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "Failed to download the external resource file.");
+        }
+    }
+
+    private MediaType contentTypeForFile(String filename) {
+        String lower = filename == null ? "" : filename.toLowerCase();
+        if (lower.endsWith(".pdf")) {
+            return MediaType.APPLICATION_PDF;
+        }
+        if (lower.endsWith(".txt")) {
+            return MediaType.TEXT_PLAIN;
+        }
+        return MediaType.APPLICATION_OCTET_STREAM;
+    }
+
+    private String externalFilename(String fileUrl, String fallbackTitle) {
+        String path = URI.create(fileUrl).getPath();
+        String candidate = Path.of(path).getFileName() == null ? "" : Path.of(path).getFileName().toString();
+        if (!candidate.isBlank()) {
+            return candidate;
+        }
+        String normalizedTitle = fallbackTitle == null || fallbackTitle.isBlank() ? "resource" : fallbackTitle.replaceAll("[^a-zA-Z0-9-_\\. ]", "").trim();
+        return normalizedTitle.isBlank() ? "resource" : normalizedTitle;
     }
 
     private static Object[] concat(Object[] base, Object... suffix) {
