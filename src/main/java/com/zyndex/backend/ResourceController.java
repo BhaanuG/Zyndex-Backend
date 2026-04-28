@@ -90,34 +90,56 @@ class ResourceController {
     }
 
     @PostMapping
-    Map<String, Object> upload(HttpServletRequest request, @ModelAttribute ResourceForm form) throws IOException {
+    Map<String, Object> upload(
+            HttpServletRequest request,
+            @RequestParam Map<String, String> form,
+            @RequestParam(value = "file", required = false) MultipartFile file) throws IOException {
         Map<String, Object> user = auth.requireUser(request);
         auth.requireRole(user, "admin");
-        if (blank(form.title) || blank(form.category) || blank(form.subject) || blank(form.resourceType) || blank(form.description) || form.file == null || form.file.isEmpty()) {
+
+        String title = field(form, "title");
+        String category = field(form, "category");
+        String subject = field(form, "subject", "author");
+        String resourceType = field(form, "resourceType", "type");
+        String description = field(form, "description");
+
+        if (blank(title) || blank(category) || blank(subject) || blank(resourceType) || blank(description) || file == null || file.isEmpty()) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "All resource fields and a file are required.");
         }
-        String fileUrl = storeFile(form.file);
+
+        String fileUrl = storeFile(file);
         jdbc.update("""
                 INSERT INTO resources
                 (approved, downloads_count, rating, created_at, updated_at, uploaded_by, description, author, category, file_url, image_url, title, type)
                 VALUES (1, 0, 0, NOW(), NOW(), ?, ?, ?, ?, ?, NULL, ?, ?)
-                """, user.get("id"), form.description, form.subject, form.category, fileUrl, form.title, SqlSupport.dbType(form.resourceType));
+                """, user.get("id"), description, subject, category, fileUrl, title, SqlSupport.dbType(resourceType));
         return Map.of("message", "Resource uploaded successfully.", "resourceId", jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class));
     }
 
     @PutMapping("/{id}")
-    Map<String, Object> update(HttpServletRequest request, @PathVariable long id, @ModelAttribute ResourceForm form) throws IOException {
+    Map<String, Object> update(
+            HttpServletRequest request,
+            @PathVariable long id,
+            @RequestParam Map<String, String> form,
+            @RequestParam(value = "file", required = false) MultipartFile file) throws IOException {
         auth.requireRole(auth.requireUser(request), "admin");
         var rows = jdbc.queryForList("SELECT * FROM resources WHERE id = ? LIMIT 1", id);
         if (rows.isEmpty()) {
             throw new ApiException(HttpStatus.NOT_FOUND, "Resource not found.");
         }
+
+        String title = field(form, "title");
+        String category = field(form, "category");
+        String subject = field(form, "subject", "author");
+        String resourceType = field(form, "resourceType", "type");
+        String description = field(form, "description");
+
         String fileUrl = AuthSupport.str(rows.get(0).get("file_url"));
-        if (form.file != null && !form.file.isEmpty()) {
-            fileUrl = storeFile(form.file);
+        if (file != null && !file.isEmpty()) {
+            fileUrl = storeFile(file);
         }
         jdbc.update("UPDATE resources SET description = ?, author = ?, category = ?, file_url = ?, title = ?, type = ?, updated_at = NOW() WHERE id = ?",
-                form.description, form.subject, form.category, fileUrl, form.title, SqlSupport.dbType(form.resourceType), id);
+                description, subject, category, fileUrl, title, SqlSupport.dbType(resourceType), id);
         return Map.of("message", "Resource updated successfully.");
     }
 
@@ -234,6 +256,16 @@ class ResourceController {
 
     private static boolean blank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private static String field(Map<String, String> form, String... names) {
+        for (String name : names) {
+            String value = form.get(name);
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return "";
     }
 
     static class ResourceForm {
